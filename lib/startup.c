@@ -1,5 +1,8 @@
 #include <stdint.h>
 #include "stm32f4xx.h"
+#include "system.h"
+#include "kconf.h"
+#include "kconf_bitbox.h"
 
 static uint8_t stack[8192]  __attribute__ ((section (".ccm")));
 
@@ -8,18 +11,24 @@ extern uint32_t _sidata[];
 extern uint32_t _edata[];
 extern uint32_t _sbss[];
 extern uint32_t _ebss[];
+extern uint32_t _sccm[];
+extern uint32_t _eccm[];
+
 
 void Reset_Handler() __attribute__((naked,noreturn));
 void Default_Handler() __attribute__((naked,noreturn));
 
-int main();
+void vga_setup(); // in new_vga.c
+void setup_usb(); // in usb.c
+void audio_init(); // in audio.c
+void board_init(); // in board.c
+int main(); // user supplied or, by default, in bitbox_main
+
 
 void Reset_Handler()
 {
 	// enable hard FPU
-	#if (__FPU_USED == 1)    
 	SCB->CPACR |= ((3UL << 10*2)|(3UL << 11*2));    /* set CP10 and CP11 Full Access */
-	#endif
 
 	// Copy the data segment initializers from flash to SRAM.
 	uint32_t *src=_sidata;
@@ -28,12 +37,35 @@ void Reset_Handler()
 	// Zero fill the bss segment.
 	for(uint32_t *dest=_sbss;dest<_ebss;dest++) *dest=0;
 
+	// Zero fill the CCM segment also
+	for(uint32_t *dest=_sccm;dest<_eccm;dest++) *dest=0;
+
+	// misc initializations
+	system_init(); // in system.h
+	board_init();
+	#ifndef NO_USB
+	setup_usb();
+	#endif 
+	#ifndef NO_AUDIO
+	audio_init();
+	#endif 
+
+	#ifndef NO_VGA
+	// be careful to initialize everything before (line callbacks ..)
+	vga_setup();
+	#endif 
+
+
 	// Call the application's entry point.
     main();
 
 	// If main ever exits, lock up.
 	for(;;);
 }
+
+void Other_Handler() {
+	for(;;);
+} 
 
 void Default_Handler()
 {
@@ -104,7 +136,7 @@ void SPI3_IRQHandler() __attribute__((weak,alias("Default_Handler")));
 void UART4_IRQHandler() __attribute__((weak,alias("Default_Handler")));
 void UART5_IRQHandler() __attribute__((weak,alias("Default_Handler")));
 void TIM6_DAC_IRQHandler() __attribute__((weak,alias("Default_Handler")));
-void TIM7_IRQHandler() __attribute__((weak,alias("Default_Handler")));
+void TIM7_IRQHandler() __attribute__((weak,alias("Default_Handler")));   
 void DMA2_Stream0_IRQHandler() __attribute__((weak,alias("Default_Handler")));
 void DMA2_Stream1_IRQHandler() __attribute__((weak,alias("Default_Handler")));
 void DMA2_Stream2_IRQHandler() __attribute__((weak,alias("Default_Handler")));

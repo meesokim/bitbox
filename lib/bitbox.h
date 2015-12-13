@@ -5,14 +5,19 @@
 #include <stdint.h>
 #include "kconf.h" // kernel conf can be the basis of values
 
-// user-provided
-void game_init();
-void game_frame();
+
+
+// --- Main -----------------------------------------------------------------------------
+void game_init(void); // user provided
+void game_frame(void); // user provided
 
 // --- Audio ----------------------------------------------------------------------------
-
+#ifndef BITBOX_SAMPLERATE
 #define BITBOX_SAMPLERATE 32000 
+#endif 
+#ifndef BITBOX_SNDBUF_LEN
 #define BITBOX_SNDBUF_LEN 512 // 16ms latency (double buffering is used)
+#endif 
 #define BITBOX_SAMPLE_BITDEPTH 8 // 8bit output 
 
 void audio_init();
@@ -20,7 +25,18 @@ void audio_init();
 void game_snd_buffer(uint16_t *buffer, int len); 
 
 // --- VGA interface ----------------------------------------------------------------------
+// micro interface to the kernel (8bpp, mono sound). can be used on bitbox _board_ also.
+
+#ifdef MICROKERNEL
+typedef uint8_t pixel_t; // 0brrrggbbl where l is used for g and b third bit.
+#define RGB(r,g,b)  (((r)&0xe0) | ((g)&0xc0)>>3 | (((b)&0xe0)>>5))
+typedef uint8_t sample_t; // mono u8
+
+#else
+typedef uint16_t pixel_t; // 0x0rrrrrgggggbbbbb pixels
 #define RGB(r,g,b)  ((((r)>>3)&0x1f)<<10 | (((g)>>3)&0x1f)<<5 | (((b)>>3)&0x1f))
+typedef uint16_t sample_t; // stereo u8
+#endif 
 
 extern uint32_t vga_line; // should be const
 extern volatile uint32_t vga_frame; 
@@ -30,7 +46,7 @@ extern void graph_line(void); // user provided graphical
 extern void graph_frame(void); // user provided graphical blitting algorithms
 
 // 0x0rrrrrgggggbbbbb pixels
-extern uint16_t *draw_buffer; // drawing next line 
+extern pixel_t *draw_buffer; // drawing next line 
 // also check kconf.h for video modes.
 
 
@@ -65,7 +81,7 @@ enum evt_type { // type (a,b,c data)
 	evt_mouse_click,  // button : (port, button_id)
 	evt_mouse_release,// button : (port, button id)
 
-	evt_keyboard_press,  // kbd (u8 key, u8 modifiers)
+	evt_keyboard_press,  // kbd (u8 key, u8 modifiers : R Gui/Alt/Shift/Ctrl, L ...
 	evt_keyboard_release,// kbd (u8 key, u8 modifiers)
 
 	evt_user, // sent by program
@@ -90,8 +106,27 @@ enum evt_type { // type (a,b,c data)
 */
 } ;
 
+
 enum kbd_modifier { 
-	LCtrl,LShift,LAlt,LWin,RCtrl,RShift,RAlt,RWin 
+#ifdef EMULATOR
+	LCtrl = 0x40,
+	LShift = 0x01,
+	LAlt = 0x100,
+	LWin = 0x400,
+	RCtrl = 0x80,
+	RShift = 0x02,
+	RAlt = 0x200,
+	RWin = 0x800
+#else
+	LCtrl = 1,
+	LShift = 2,
+	LAlt = 4,
+	LWin = 8,
+	RCtrl = 16,
+	RShift = 32,
+	RAlt = 64,
+	RWin = 128
+#endif
 };
 
 enum gamepad_buttons_enum {
@@ -115,19 +150,26 @@ enum gamepad_buttons_enum {
 };
 
 #define GAMEPAD_PRESSED(id , key) (gamepad_buttons[id] & (gamepad_##key))
+enum keycodes{
+	KEY_ERR = 0xff,
+	KEY_RIGHT = 128,
+	KEY_LEFT = 129,
+	KEY_DOWN = 130,
+	KEY_UP = 131
+};
 
 struct event { //should be coded in 32bits 
 	uint8_t type;
 	union {
 		struct {
-			uint8_t port;
-			uint8_t type;
-			uint8_t subtype;
+			uint8_t port; // 0 or 1 
+			uint8_t type; // type of device
+			uint8_t subtype; // subtype (if any)
 		} device;
 
 		struct {
-			uint8_t port;
-			uint8_t id;
+			uint8_t port; // USB port 0 or 1
+			uint8_t id; // id of button pressed
 		} button;
 		
 		// used for mice
@@ -137,10 +179,12 @@ struct event { //should be coded in 32bits
 		} mov;
 
 		struct {
-			uint8_t key, mod;
+			uint8_t key; // key is the boot protocol physical key pressed,
+			uint8_t mod; // modifier bitmask : LCtrl, LAlt, ...
+			uint8_t sym; // symbol is the ascii code or logical key pressed (including KEY_RIGHT as defined ) 
 		} kbd;
 
-		uint8_t data[3];
+		uint8_t data[3]; // raw value
 	};		
 } __attribute__ ((__packed__));
 
@@ -163,8 +207,6 @@ void event_push(struct event e);
 
 // returns "empty event"=0 if get from empty
 struct event event_get();
-
-char kbd_map(struct event kbd_e);
 
 /* This emulates the gamepad with a keyboard.
  * fetches all keyboard events, 

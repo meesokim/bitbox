@@ -76,8 +76,8 @@ def quantize_couples(cpls,nb=255):
 
 def reduce_couple(c) :
     'R8G8B8A8 to A1R5G5B5 - x2 for couples'
-    a = (1<<15 | (c[0]>>3)<<10 | (c[1]>>3)<<5 | c[2]>>3) if c[3]>127 else 0 
-    b = (1<<15 | (c[4]>>3)<<10 | (c[5]>>3)<<5 | c[6]>>3) if c[7]>127 else 0 
+    a = (1<<15 | (c[0]*31/255)<<10 | (c[1]*31/255)<<5 | c[2]*31/255) if c[3]>127 else 0 
+    b = (1<<15 | (c[4]*31/255)<<10 | (c[5]*31/255)<<5 | c[6]*31/255) if c[7]>127 else 0 
     return b<<16|a # little endian
 
 
@@ -193,7 +193,6 @@ if not all(im.size == (Width,Height) for im in srcs) :
 src = Image.new("RGBA", (Width,Height*len(srcs)))
 for i,im in enumerate(srcs) : 
     src.paste(im,(0,i*Height))
-
 # output 
 f = open(args.file_out,'wb+')
 couples_encode(src,f,Height,'c8',args.file_out+'.png')

@@ -3,9 +3,8 @@
 # DO NOT FORGET to define BITBOX environment variable 
 
 NO_USB=1
-NO_SDCARD=1
 
-# See lib/simple.h for modes 
+# 2 to 5, see lib/simple.h for modes 
 VGA_SIMPLE_MODE=4
 
 NAME = test_simplegraph

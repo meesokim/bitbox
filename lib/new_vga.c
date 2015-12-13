@@ -33,15 +33,11 @@ mode as defined in kconf.h values
 #include <stdint.h>
 
 #include "system.h" // interrupts 
-#include "stm32f4xx.h" // ports, timers, profile
 #include "kconf.h"
-
-#include "GPIO.h"
-#include "RCC.h"
-
+#include "stm32f4xx.h" // ports, timers, profile
 
 // --- local
-#define TIMER_CYCL (SYSCLK/VGA_VFREQ/APB_PRESC)
+#define TIMER_CYCL (SYSCLK/VGA_VFREQ/APB1_DIV)
 #define SYNC_END (VGA_H_SYNC*TIMER_CYCL/(VGA_H_PIXELS+VGA_H_SYNC+VGA_H_FRONTPORCH+VGA_H_BACKPORCH))
 #define BACKPORCH_END ((VGA_H_SYNC+VGA_H_BACKPORCH)*TIMER_CYCL/(VGA_H_PIXELS+VGA_H_SYNC+VGA_H_FRONTPORCH+VGA_H_BACKPORCH))
 
@@ -49,7 +45,7 @@ mode as defined in kconf.h values
 #ifdef PROFILE
 // from http://forums.arm.com/index.php?/topic/13949-cycle-count-in-cortex-m3/
 // also average ?
-uint32_t line_time,max_line_time, max_line; // maximum time of line 
+uint32_t line_time; // maximum time of line 
 // gdb : disp *(uint32_t *)0xE0001004
 #endif 
 
@@ -72,17 +68,25 @@ volatile int vga_odd; // only in skipline modes
 uint16_t LineBuffer1[1024] __attribute__((aligned (1024))); // __attribute__ ((section (".sram")))
 uint16_t LineBuffer2[1024] __attribute__((aligned (1024)));
 
-uint16_t *display_buffer; // will be sent to display 
-uint16_t *draw_buffer; // will be drawn (bg already drawn)
-
-static void HSYNCHandler();
-static void DMACompleteHandler();
+uint16_t *display_buffer = LineBuffer1; // will be sent to display 
+uint16_t *draw_buffer = LineBuffer2; // will be drawn (bg already drawn)
 
 
-static inline void output_black()
+static inline void vga_output_black()
 {
-    GPIOE->BSRRH=0x7fff; // Set signal to black. 
+    GPIOE->BSRR |= GPIO_BSRR_BR_0*0x7fff; // Set signal to black. 
 } 
+
+static inline void vga_raise_vsync() 
+{
+	GPIOA->BSRR |= GPIO_BSRR_BS_0; // raise VSync line
+}
+
+static inline void vga_lower_vsync() 
+{
+	GPIOA->BSRR |= GPIO_BSRR_BR_0; // raise VSync line
+}
+
 
 
 void vga_setup()
@@ -93,13 +97,16 @@ void vga_setup()
 		LineBuffer1[i]=0;
 		LineBuffer2[i]=0;
 	}
-	//EnableAPB2PeripheralClock(RCC_APB2ENR_SYSCFGEN); // ??? useful ?
+
+	RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
 
 	// initialize software state.
 	vga_line=0;	vga_frame=0;
+	
 	display_buffer=LineBuffer1;
 	draw_buffer=LineBuffer2;
-
+	
+	
 	// --- GPIO ---------------------------------------------------------------------------------------
 	// init vga gpio ports A0 vsync, A1 hsync B0-11 dac
 	// XXX here port PC11 is used for vsync !!!  
@@ -107,36 +114,29 @@ void vga_setup()
 	// GPIO A pins 0 (vsync- not bitbox prototype) & 1 (hsync) and GPIO E for pixel DAC
 	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOEEN; // enable gpio E
 
-	// - Configure DAC pins in GPIOB 0-11
-	SetGPIOOutputMode(GPIOE,0x7fff); 
-	SetGPIOPushPullOutput(GPIOE,0x7fff);
-	SetGPIOSpeed50MHz(GPIOE,0x7fff); 
-	SetGPIOPullDownResistor(GPIOE,0x7fff);
+	// GPIO A pins 0 (vsync- not bitbox prototype) & 1 (hsync) and GPIO E for pixel DAC
 
-	output_black();
+	// - Configure DAC pins in GPIOE 0-14
+	// PA0-7 out, pushpull(default), 50MHz, pulldown
+	
+	// clear bits 0-14 (bit15 being User Button)
+    GPIOE->MODER    |= 0b00010101010101010101010101010101; // 00:IN 01:OUT 10:ALT 11:ANALOG x15 bits
+    GPIOE->OSPEEDR  |= 0b00101010101010101010101010101010; // 10 : SPEED=50MHz 
+    GPIOE->PUPDR    |= 0b00101010101010101010101010101010; // 10 = Pull Down x 15
 
-	// - Configure sync pins as GPIOA 0 (vsync) , 1 (hsync)
+	vga_output_black();
+
+	// - Configure sync pins as GPIOA 0 (vsync - out) , 1 (hsync : alt - PWM) high speed each
 	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN; // enable gpioA
-	SetGPIOAlternateFunctionMode(GPIOA,0b10); // PA1 as alternate
-	SelectAlternateFunctionForGPIOPin(GPIOA,1,2); // TIM 5 CH 2, see Table9 of datasheet, p60 : alt func 2 is PA1
+	GPIOA->MODER |= GPIO_MODER_MODER0_0 * 0b01 | GPIO_MODER_MODER1_0 * 0b10; // PA0 out, PA1 alternate 
+    GPIOA->OSPEEDR  |= 0b1010; // 10 : SPEED=50MHz 
 
-	SetGPIOOutputMode(GPIOA, (1<<0)); // PA01 as ouput
-
-	SetGPIOPushPullOutput(GPIOA, (1<<1) | (1<<0));
-	SetGPIOSpeed50MHz(GPIOA, (1<<1) | (1<<0));
-	SetGPIOPullUpResistor(GPIOA, (1<<1) | (1<<0));
-
-	// Also set GPIOC as current bitbox has it 
-        /*
-	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN; // enable gpioC
-	SetGPIOOutputMode(GPIOC, 1<<11); // PC11 as ouput
-	SetGPIOPushPullOutput(GPIOC,1<<11);
-	SetGPIOSpeed50MHz(GPIOC,1<<11);
-	SetGPIOPullUpResistor(GPIOC,1<<11);
-        */
+	GPIOA->AFR[0] |= 2<<4; // TIM 5 CH 2, see Table9 of datasheet, p60 : alt func 2 is PA1
+    GPIOA->PUPDR  |=  GPIO_PUPDR_PUPDR0_0 * 0b01 | GPIO_PUPDR_PUPDR1_0 * 0b01 ; // PB1, PB15 pullup 01
 
 	// drive them high
-	GPIOA->BSRRL=(1<<1) | (1<<0);
+	//GPIOA->BSRR |= GPIO_BSRR_BS_0 | GPIO_BSRR_BS_1; // raise VSync line
+	GPIOA->BSRR=(1<<1) | (1<<0);
 
 	// --- TIMERS ---------------------------------------------------------------------------------------
 	
@@ -201,7 +201,7 @@ void vga_setup()
 	// wait for last line ? 
 
 	// Enable HSync timer interrupt and set highest priority.
-	InstallInterruptHandler(TIM5_IRQn,HSYNCHandler);
+	//InstallInterruptHandler(TIM5_IRQn,TIM5_IRQHandler);
 	NVIC_EnableIRQ(TIM5_IRQn);
 	NVIC_SetPriority(TIM5_IRQn,0);
 
@@ -236,12 +236,10 @@ void vga_setup()
 	// Stop it and configure interrupts.
 	DMA2_Stream5->CR&=~DMA_SxCR_EN;
 	
-	NVIC_DisableIRQ(DMA2_Stream5_IRQn);
-	InstallInterruptHandler(DMA2_Stream5_IRQn,DMACompleteHandler);
+	//NVIC_DisableIRQ(DMA2_Stream5_IRQn);
+	//InstallInterruptHandler(DMA2_Stream5_IRQn,DMACompleteHandler);
 	NVIC_EnableIRQ(DMA2_Stream5_IRQn);
 	NVIC_SetPriority(DMA2_Stream5_IRQn,0);
-
-
 
 }
 
@@ -275,17 +273,26 @@ static void prepare_pixel_DMA()
 	TIM1->CR1|=TIM_CR1_CEN; // go .. when slave active
 
 	DMA2_Stream5->CR|=DMA_SxCR_EN; // Go .. when timer 3 will start.
+
 }
 
-static void HSYNCHandler()
+
+#ifdef MICROKERNEL
+// simulates MICRO interface through palette expansion
+extern const uint16_t palette_flash[256]; // microX palette in bitbox pixels
+static inline void expand_line( void )
 {
-	// TIM5->SR=0;
-	__asm__ volatile(
-	"	mov.w	r1,#0x40000000\n"
-	"	movs	r0,#0\n"
-	"	strh	r0,[r1,#0xC10]\n"
-	:::"r0","r1");
-	
+	uint8_t  * restrict drawbuf8=(uint8_t *) draw_buffer;
+	// expand in place buffer from 8bits RRRGGBBL to 15bits RRRrrGGLggBBLbb 
+	// XXX unroll loop, read 4 by 4 pixels src, write 2 pixels out by two ... 
+	for (int i=VGA_H_PIXELS-1;i>=0;i--)
+		draw_buffer[i] = palette_flash[drawbuf8[i]]; 
+}
+#endif 
+ void __attribute__ ((used)) TIM5_IRQHandler() // Hsync Handler
+{
+	TIM5->SR=0; // clear pending interrupts 
+
 	#ifdef VGA_SKIPLINE
 	vga_line+=vga_odd;
 	vga_odd=1-vga_odd;
@@ -293,7 +300,7 @@ static void HSYNCHandler()
 	vga_line++;
 	#endif 
 
-        // starting from line #1, line #0 already in drawbuffer
+       // starting from line #1, line #0 already in drawbuffer
 	if (vga_line < VGA_V_PIXELS) {
 
 		#ifdef VGA_SKIPLINE
@@ -305,50 +312,56 @@ static void HSYNCHandler()
 			t=display_buffer;
 			display_buffer = draw_buffer;
 			draw_buffer = t;
-		}
-		
+		}		
 
 		prepare_pixel_DMA(); // will be triggered 
-		
+
 		#ifdef PROFILE
 		line_time = DWT->CYCCNT; // reset the perf counter
-		#endif 
+		#endif
 
-		graph_line(); // Game callback !		
+		graph_line(); // Game callback !
 
         #ifdef PROFILE
-		line_time = DWT->CYCCNT - line_time; // read the counter
-		if (line_time>max_line_time) {
-			max_line_time=line_time;
-			max_line =vga_line;
-		}
+        line_time = DWT->CYCCNT - line_time; // read the counter 
+        line_time /= VGA_PIXELCLOCK; // scale it to screen width 
+
+        // plot from 0 to VGA_V_PIXELS a green or red element
+        uint16_t c=0b1111100000; //green
+        if (line_time>VGA_H_PIXELS) // start over but red
+        {
+            line_time-=VGA_H_PIXELS;
+            c=0b111110000000000; // red
+        }
+        draw_buffer[line_time-1]=0;
+        draw_buffer[line_time]=c;
+        draw_buffer[line_time+1]=0;
+        #endif
+		#if MICROKERNEL // Micro interface to bitbox hardware
+		if (vga_odd)
+			expand_line();
 		#endif
-		
+
 	}  else {
 		if (vga_line== VGA_V_PIXELS) {
 			vga_frame++; // new frame sync now. 
 			graph_frame(); 
 		}
 
-		if (vga_line==VGA_V_PIXELS+VGA_V_FRONTPORCH+1) 
-		{
-			GPIOA->BSRRH|=(1<<0); // lower VSync line
-		}
-		else if(vga_line==VGA_V_PIXELS+1+VGA_V_FRONTPORCH+VGA_V_SYNC)
-		{
-			GPIOA->BSRRL|=(1<<0); // raise VSync line
-		}
-		else if(vga_line==VGA_V_PIXELS+VGA_V_FRONTPORCH+VGA_V_SYNC+VGA_V_BACKPORCH)
-		{
+		if (vga_line==VGA_V_PIXELS+VGA_V_FRONTPORCH+1) {
+			vga_lower_vsync();
+		} else if(vga_line==VGA_V_PIXELS+1+VGA_V_FRONTPORCH+VGA_V_SYNC)	{
+			vga_raise_vsync();
+		} else if(vga_line==VGA_V_PIXELS+VGA_V_FRONTPORCH+VGA_V_SYNC+VGA_V_BACKPORCH) {
 			vga_line=0;
             graph_line();  // first line next frame!
 		}
 	}
 }
 
-static void DMACompleteHandler()
+void __attribute__ ((used)) DMA2_Stream5_IRQHandler() // DMA handler
 {
-	output_black(); // This should not be necessary, as timing is wrong in sw. 
+	vga_output_black(); // This should not be necessary, as timing is wrong in sw. 
 
 	// Clear Transfer complete interrupt flag of stream 5
 	do {

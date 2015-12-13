@@ -13,13 +13,15 @@ to use it,
 
 #include <stdint.h>
 
-#define MAX_VOICES 64
+#define MAX_VOICES 16
 
 
 /* plays a sound once stored from data in memory. 
 
    data, data_len is an array of sound data as int8_t
    vol_left and vol_right define the panning from 0 to 255. Setting volume to 0,0 frees the note.
+   loop_pos is the position of the sample where to loop at once we reach position data_len. Set to -1 to play once.
+   speed is the speed in samples per second relative to the BITBOX_SAMPLERATE (32000) *256, so 256 is 32k samples/s
 
    returns a voice_id - useful for stopping it, or setting volume by example
    if no free voice is found, the sound is not played and a negative value is returned
